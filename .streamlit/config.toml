@@ -1,0 +1,5 @@
+[server]
+# "poll" avoids the local_sources_watcher deep-import-probing behavior that
+# prints the harmless "Examining the path of transformers.models..." /
+# torchvision tracebacks on every save. Hot-reload still works.
+fileWatcherType = "poll"
