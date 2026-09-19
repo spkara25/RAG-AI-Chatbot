@@ -76,22 +76,44 @@ st.markdown(
         margin-bottom: 1.4rem;
     }
 
-    .source-pill {
-        display: inline-block;
-        background: #eef0f3;
-        border-radius: 999px;
-        padding: 2px 10px;
-        font-size: 0.78rem;
-        color: #444;
-        margin: 2px 4px 2px 0;
+    .source-list {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+    }
+    .source-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 5px 8px;
+        border-radius: 8px;
+    }
+    .source-row:hover {
+        background: #f5f5f7;
+    }
+    .source-name {
+        font-weight: 600;
+        font-size: 0.8rem;
+        color: #333;
+        white-space: nowrap;
+        flex-shrink: 0;
+    }
+    .source-snippet {
+        font-size: 0.8rem;
+        color: #8b8b90;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        flex: 1;
+        min-width: 0;
     }
     .score-badge {
         display: inline-block;
         border-radius: 999px;
-        padding: 2px 9px;
-        font-size: 0.72rem;
+        padding: 1px 8px;
+        font-size: 0.7rem;
         font-weight: 600;
-        margin-left: 6px;
+        flex-shrink: 0;
     }
     .score-high { background: #dcf5e6; color: #167a3e; }
     .score-medium { background: #fdf1d6; color: #9a6b00; }
@@ -261,18 +283,26 @@ if st.session_state.processed_files:
 
 def render_sources(sources):
     with st.expander(f"Sources ({len(sources)})"):
+        rows = []
         for s in sources:
-            page_str = f", p. {s['page']}" if s.get("page") else ""
+            page_str = f" · p.{s['page']}" if s.get("page") else ""
             score_html = ""
             if s.get("score") is not None:
                 pct = round(s["score"] * 100)
                 tier = "high" if s["score"] >= 0.6 else "medium" if s["score"] >= 0.35 else "low"
-                score_html = f'<span class="score-badge score-{tier}">{pct}% match</span>'
-            st.markdown(
-                f'<span class="source-pill">{s["source"]}{page_str}</span>{score_html}',
-                unsafe_allow_html=True,
+                score_html = f'<span class="score-badge score-{tier}">{pct}%</span>'
+
+            snippet = " ".join(s["text"].split())  # collapse newlines/extra whitespace to one line
+            snippet_attr = snippet.replace('"', "&quot;")
+
+            rows.append(
+                f'<div class="source-row" title="{snippet_attr}">'
+                f'<span class="source-name">{s["source"]}{page_str}</span>'
+                f"{score_html}"
+                f'<span class="source-snippet">{snippet}</span>'
+                f"</div>"
             )
-            st.caption(s["text"])
+        st.markdown('<div class="source-list">' + "".join(rows) + "</div>", unsafe_allow_html=True)
 
 
 # --------------------------------------------------------------------------
