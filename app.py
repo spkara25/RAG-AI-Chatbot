@@ -1,9 +1,20 @@
+"""
+app.py
+------
+Streamlit front-end for the AI Knowledge Assistant.
+
+Run with:
+    streamlit run app.py
+"""
 
 import os
 import tempfile
 import hashlib
 import logging
 
+# Streamlit's hot-reload file watcher probes every submodule of `transformers`
+# (including vision ones that need `torchvision`, which we don't use here) and
+# logs a harmless traceback for each. This just silences that specific logger.
 logging.getLogger("streamlit.watcher.local_sources_watcher").setLevel(logging.ERROR)
 
 import streamlit as st
@@ -17,9 +28,6 @@ from rag_engine import (
 )
 
 st.set_page_config(page_title="DocChat", page_icon="💬", layout="wide")
-
-USER_AVATAR = "You"
-BOT_AVATAR = "DocChat"
 
 EXAMPLE_PROMPTS = [
     "Summarize the key points of this document",
@@ -45,10 +53,10 @@ st.markdown(
         padding: 0.25rem 0.5rem;
         margin-bottom: 0.5rem;
     }
-    div[data-testid="stChatMessage"]:has(img[alt="🙂"]) {
+    div[data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarUser"]) {
         background-color: #eef3ff;
     }
-    div[data-testid="stChatMessage"]:has(img[alt="💬"]) {
+    div[data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarAssistant"]) {
         background-color: #f5f5f7;
     }
 
@@ -123,6 +131,10 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
+
+# --------------------------------------------------------------------------
+# Session state
+# --------------------------------------------------------------------------
 if "vectorstore" not in st.session_state:
     st.session_state.vectorstore = None
 if "chat_history" not in st.session_state:
@@ -200,6 +212,9 @@ with st.sidebar:
         st.session_state.chat_history = []
         st.rerun()
 
+# --------------------------------------------------------------------------
+# Header
+# --------------------------------------------------------------------------
 st.markdown('<p class="app-title">DocChat</p>', unsafe_allow_html=True)
 st.markdown(
     '<p class="app-subtitle">Chat with your documents. Attach files below, then ask anything.</p>',
@@ -269,8 +284,7 @@ if not st.session_state.chat_history and st.session_state.vectorstore is not Non
     st.markdown(chip_html + "</div>", unsafe_allow_html=True)
 
 for turn in st.session_state.chat_history:
-    avatar = USER_AVATAR if turn["role"] == "user" else BOT_AVATAR
-    with st.chat_message(turn["role"], avatar=avatar):
+    with st.chat_message(turn["role"]):
         if turn["role"] == "assistant" and turn.get("confidence") == "low":
             st.markdown(
                 '<div class="confidence-banner low">⚠ The documents may not fully cover this — treat this answer with caution.</div>',
@@ -289,10 +303,10 @@ if question:
         st.warning(f"Add your {provider.upper()} API key in Settings first.")
     else:
         st.session_state.chat_history.append({"role": "user", "content": question})
-        with st.chat_message("user", avatar=USER_AVATAR):
+        with st.chat_message("user"):
             st.markdown(question)
 
-        with st.chat_message("assistant", avatar=BOT_AVATAR):
+        with st.chat_message("assistant"):
             with st.spinner("Thinking..."):
                 try:
                     llm = get_llm(provider, api_key, model_name)
