@@ -58,12 +58,14 @@ class SourceChunk:
     source: str
     page: Optional[int]
     text: str
+    score: Optional[float] = None  # 0-1 relevance score, when available
 
 
 @dataclass
 class RAGAnswer:
     answer: str
     sources: List[SourceChunk]
+    confidence: Optional[str] = None  # "high" / "medium" / "low", or None if unscored
 
 
 # --------------------------------------------------------------------------
@@ -264,20 +266,69 @@ def _extract_text(response) -> str:
     return str(response) if response is not None else ""
 
 
+def retrieve_with_scores(
+    vectorstore: FAISS,
+    question: str,
+    k: int = 4,
+    search_type: str = "similarity",
+    score_threshold: float = 0.0,
+):
+    """
+    Retrieve chunks for a question, with a relevance score attached to each
+    when the search type supports it. This is the "improved retrieval"
+    layer: it lets the UI show *how* relevant each source actually is, and
+    lets low-relevance noise be filtered out instead of always forcing k
+    chunks into the prompt regardless of quality.
+
+    search_type:
+      - "similarity": plain nearest-neighbor search, with a 0-1 relevance
+        score per chunk (via FAISS's relevance-score normalization).
+      - "mmr": Maximal Marginal Relevance — trades a little top-1 relevance
+        for less redundant, more diverse chunks (useful for broad/vague
+        questions). Scores aren't available for MMR, so score=None.
+
+    Returns: list of (Document, Optional[float] score) tuples, already
+    filtered by score_threshold when scores are available.
+    """
+    if search_type == "mmr":
+        docs = vectorstore.max_marginal_relevance_search(question, k=k, fetch_k=max(k * 4, 20))
+        return [(d, None) for d in docs]
+
+    try:
+        scored = vectorstore.similarity_search_with_relevance_scores(question, k=k)
+    except Exception:
+        # Some vectorstore/embedding combinations don't support normalized
+        # relevance scores — fall back to plain similarity search with no score.
+        return [(d, None) for d in vectorstore.similarity_search(question, k=k)]
+
+    if score_threshold > 0:
+        filtered = [(d, s) for d, s in scored if s >= score_threshold]
+        # Never return zero results just because everything was below
+        # threshold — better to answer with the best-available (if weak)
+        # context than to silently give nothing back.
+        return filtered if filtered else scored[:1]
+
+    return scored
+
+
 def answer_question(
     vectorstore: FAISS,
     question: str,
     llm,
     k: int = 4,
     chat_history: Optional[List[dict]] = None,
+    search_type: str = "similarity",
+    score_threshold: float = 0.0,
 ) -> RAGAnswer:
     """
     Retrieve top-k relevant chunks and ask the LLM to answer using only them.
     chat_history: optional list of {"role": "user"/"assistant", "content": str}
                   used to give the LLM conversational context (not re-retrieved).
     """
-    retriever = vectorstore.as_retriever(search_kwargs={"k": k})
-    retrieved_docs = retriever.invoke(question)
+    scored_docs = retrieve_with_scores(
+        vectorstore, question, k=k, search_type=search_type, score_threshold=score_threshold
+    )
+    retrieved_docs = [d for d, _ in scored_docs]
 
     context_str = _format_context(retrieved_docs)
     system_msg = SYSTEM_PROMPT.format(context=context_str)
@@ -296,8 +347,24 @@ def answer_question(
             source=d.metadata.get("source", "unknown"),
             page=(d.metadata.get("page") + 1) if isinstance(d.metadata.get("page"), int) else None,
             text=d.page_content[:300].strip() + ("..." if len(d.page_content) > 300 else ""),
+            score=round(float(score), 3) if score is not None else None,
         )
-        for d in retrieved_docs
+        for d, score in scored_docs
     ]
 
-    return RAGAnswer(answer=answer_text, sources=sources)
+    # Lightweight retrieval-quality signal (no extra LLM call): a low top
+    # relevance score usually means the documents don't actually cover the
+    # question, which is worth surfacing to the user even if the model
+    # produced a fluent-sounding answer anyway.
+    scores_available = [s.score for s in sources if s.score is not None]
+    confidence = None
+    if scores_available:
+        top_score = max(scores_available)
+        if top_score >= 0.6:
+            confidence = "high"
+        elif top_score >= 0.35:
+            confidence = "medium"
+        else:
+            confidence = "low"
+
+    return RAGAnswer(answer=answer_text, sources=sources, confidence=confidence)

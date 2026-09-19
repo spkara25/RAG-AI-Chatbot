@@ -32,8 +32,14 @@ st.set_page_config(page_title="DocChat", page_icon="💬", layout="wide")
 USER_AVATAR = "🙂"
 BOT_AVATAR = "💬"
 
+EXAMPLE_PROMPTS = [
+    "Summarize the key points of this document",
+    "What are the main risks or limitations mentioned?",
+    "List any numbers, dates, or figures that appear",
+]
+
 # --------------------------------------------------------------------------
-# Look & feel — plain chat-app styling instead of a "tool" look
+# Look & feel
 # --------------------------------------------------------------------------
 st.markdown(
     """
@@ -41,11 +47,10 @@ st.markdown(
     #MainMenu, footer, header {visibility: hidden;}
 
     .block-container {
-        max-width: 820px;
+        max-width: 860px;
         padding-top: 2rem;
     }
 
-    /* Chat bubbles */
     div[data-testid="stChatMessage"] {
         border-radius: 16px;
         padding: 0.25rem 0.5rem;
@@ -58,13 +63,12 @@ st.markdown(
         background-color: #f5f5f7;
     }
 
-    /* Chat input pinned bar */
     div[data-testid="stChatInput"] {
         border-radius: 24px;
     }
 
     .app-title {
-        font-size: 1.6rem;
+        font-size: 1.7rem;
         font-weight: 700;
         margin-bottom: 0;
     }
@@ -72,8 +76,9 @@ st.markdown(
         color: #6b7280;
         font-size: 0.95rem;
         margin-top: 0.1rem;
-        margin-bottom: 1.2rem;
+        margin-bottom: 1.4rem;
     }
+
     .source-pill {
         display: inline-block;
         background: #eef0f3;
@@ -82,6 +87,48 @@ st.markdown(
         font-size: 0.78rem;
         color: #444;
         margin: 2px 4px 2px 0;
+    }
+    .score-badge {
+        display: inline-block;
+        border-radius: 999px;
+        padding: 2px 9px;
+        font-size: 0.72rem;
+        font-weight: 600;
+        margin-left: 6px;
+    }
+    .score-high { background: #dcf5e6; color: #167a3e; }
+    .score-medium { background: #fdf1d6; color: #9a6b00; }
+    .score-low { background: #fbe3e3; color: #b3261e; }
+
+    .confidence-banner {
+        border-radius: 10px;
+        padding: 8px 14px;
+        font-size: 0.85rem;
+        margin-bottom: 10px;
+    }
+    .confidence-banner.low {
+        background: #fbe3e3;
+        color: #8c1d18;
+    }
+
+    .empty-state {
+        text-align: center;
+        padding: 3rem 1rem;
+        color: #6b7280;
+    }
+    .example-chip {
+        display: inline-block;
+        background: #f5f5f7;
+        border: 1px solid #e3e3e6;
+        border-radius: 999px;
+        padding: 6px 14px;
+        margin: 4px;
+        font-size: 0.85rem;
+        color: #333;
+    }
+
+    [data-testid="stFileUploaderDropzone"] {
+        border-radius: 14px;
     }
     </style>
     """,
@@ -94,14 +141,27 @@ st.markdown(
 if "vectorstore" not in st.session_state:
     st.session_state.vectorstore = None
 if "chat_history" not in st.session_state:
-    st.session_state.chat_history = []  # list of {"role", "content"}
+    st.session_state.chat_history = []
 if "processed_files" not in st.session_state:
     st.session_state.processed_files = []
 if "indexed_signature" not in st.session_state:
     st.session_state.indexed_signature = None
+if "pending_question" not in st.session_state:
+    st.session_state.pending_question = None
+
+
+def _get_secret(name: str) -> str:
+    """Check Streamlit secrets first (for deployed apps), then env vars."""
+    try:
+        if name in st.secrets:
+            return st.secrets[name]
+    except Exception:
+        pass
+    return os.environ.get(name, "")
+
 
 # --------------------------------------------------------------------------
-# Sidebar — kept minimal, plain-language settings
+# Sidebar
 # --------------------------------------------------------------------------
 with st.sidebar:
     st.subheader("Settings")
@@ -110,7 +170,7 @@ with st.sidebar:
     api_key = st.text_input(
         f"{provider.upper()} API key",
         type="password",
-        value=os.environ.get("OPENAI_API_KEY" if provider == "openai" else "GEMINI_API_KEY", ""),
+        value=_get_secret("OPENAI_API_KEY" if provider == "openai" else "GEMINI_API_KEY"),
     )
     model_name = st.text_input(
         "Model",
@@ -121,6 +181,20 @@ with st.sidebar:
         chunk_size = st.slider("Chunk size", 300, 2000, 1000, step=100)
         chunk_overlap = st.slider("Chunk overlap", 0, 400, 150, step=50)
         top_k = st.slider("Chunks retrieved per answer", 1, 10, 4)
+        search_type = st.radio(
+            "Retrieval strategy",
+            ["similarity", "mmr"],
+            help=(
+                "Similarity: return the most relevant chunks. "
+                "MMR (Maximal Marginal Relevance): trades a little top relevance "
+                "for less redundant, more diverse chunks — better for broad questions."
+            ),
+        )
+        score_threshold = st.slider(
+            "Minimum relevance score",
+            0.0, 0.8, 0.0, step=0.05,
+            help="Discard retrieved chunks below this relevance score (similarity mode only).",
+        )
 
     st.divider()
 
@@ -151,7 +225,7 @@ st.markdown(
 )
 
 # --------------------------------------------------------------------------
-# File attach — auto-indexes on change, no separate "build" step
+# File attach — auto-indexes on change
 # --------------------------------------------------------------------------
 uploaded_files = st.file_uploader(
     "Attach documents",
@@ -187,19 +261,42 @@ if uploaded_files:
 if st.session_state.processed_files:
     st.caption("Ready: " + ", ".join(st.session_state.processed_files))
 
+
+def render_sources(sources):
+    with st.expander(f"Sources ({len(sources)})"):
+        for s in sources:
+            page_str = f", p. {s['page']}" if s.get("page") else ""
+            score_html = ""
+            if s.get("score") is not None:
+                pct = round(s["score"] * 100)
+                tier = "high" if s["score"] >= 0.6 else "medium" if s["score"] >= 0.35 else "low"
+                score_html = f'<span class="score-badge score-{tier}">{pct}% match</span>'
+            st.markdown(
+                f'<span class="source-pill">{s["source"]}{page_str}</span>{score_html}',
+                unsafe_allow_html=True,
+            )
+            st.caption(s["text"])
+
+
 # --------------------------------------------------------------------------
 # Chat
 # --------------------------------------------------------------------------
+if not st.session_state.chat_history and st.session_state.vectorstore is not None:
+    st.markdown('<div class="empty-state">Ask something about your document to get started.<br><br>', unsafe_allow_html=True)
+    chip_html = "".join(f'<span class="example-chip">{p}</span>' for p in EXAMPLE_PROMPTS)
+    st.markdown(chip_html + "</div>", unsafe_allow_html=True)
+
 for turn in st.session_state.chat_history:
     avatar = USER_AVATAR if turn["role"] == "user" else BOT_AVATAR
     with st.chat_message(turn["role"], avatar=avatar):
+        if turn["role"] == "assistant" and turn.get("confidence") == "low":
+            st.markdown(
+                '<div class="confidence-banner low">⚠ The documents may not fully cover this — treat this answer with caution.</div>',
+                unsafe_allow_html=True,
+            )
         st.markdown(turn["content"])
         if turn["role"] == "assistant" and turn.get("sources"):
-            with st.expander("Sources"):
-                for s in turn["sources"]:
-                    page_str = f", p. {s['page']}" if s.get("page") else ""
-                    st.markdown(f'<span class="source-pill">{s["source"]}{page_str}</span>', unsafe_allow_html=True)
-                    st.caption(s["text"])
+            render_sources(turn["sources"])
 
 question = st.chat_input("Message DocChat...")
 
@@ -223,21 +320,32 @@ if question:
                         llm,
                         k=top_k,
                         chat_history=st.session_state.chat_history[:-1],
+                        search_type=search_type,
+                        score_threshold=score_threshold,
                     )
+
+                    if result.confidence == "low":
+                        st.markdown(
+                            '<div class="confidence-banner low">⚠ The documents may not fully cover this — treat this answer with caution.</div>',
+                            unsafe_allow_html=True,
+                        )
+
                     st.markdown(result.answer)
+
                     sources_serialized = [
-                        {"source": s.source, "page": s.page, "text": s.text}
+                        {"source": s.source, "page": s.page, "text": s.text, "score": s.score}
                         for s in result.sources
                     ]
                     if sources_serialized:
-                        with st.expander("Sources"):
-                            for s in sources_serialized:
-                                page_str = f", p. {s['page']}" if s.get("page") else ""
-                                st.markdown(f'<span class="source-pill">{s["source"]}{page_str}</span>', unsafe_allow_html=True)
-                                st.caption(s["text"])
+                        render_sources(sources_serialized)
 
                     st.session_state.chat_history.append(
-                        {"role": "assistant", "content": result.answer, "sources": sources_serialized}
+                        {
+                            "role": "assistant",
+                            "content": result.answer,
+                            "sources": sources_serialized,
+                            "confidence": result.confidence,
+                        }
                     )
                 except Exception as e:
                     st.error(f"Something went wrong: {e}")
