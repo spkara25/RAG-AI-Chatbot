@@ -1,30 +1,3 @@
-"""
-rag_engine.py
---------------
-Core RAG (Retrieval-Augmented Generation) pipeline.
-
-Pipeline stages implemented here:
-  1. Load documents (PDF / TXT / DOCX)
-  2. Split into chunks
-  3. Generate embeddings (LOCAL, free — sentence-transformers)
-  4. Store in a FAISS vector store
-  5. Retrieve relevant chunks for a question
-  6. Generate an answer using an LLM, constrained to the retrieved context
-  7. Return the answer + source citations
-
-Design choice for cost control
--------------------------------
-Embeddings are computed locally with `sentence-transformers/all-MiniLM-L6-v2`
-(runs on CPU, no API key, no cost, no rate limits). This is normally the most
-API-call-heavy part of a RAG pipeline (one call per chunk), so doing it for
-free is what keeps this app cheap to run repeatedly.
-
-Only the final answer-generation step calls an LLM API, and only ONCE per
-question (not once per chunk), using a cheap/fast model by default
-(gpt-4o-mini for OpenAI, or gemini-1.5-flash for Gemini — both inexpensive,
-and Gemini has a free tier).
-"""
-
 import os
 from dataclasses import dataclass
 from typing import List, Optional
@@ -47,14 +20,8 @@ try:
 except ImportError:
     from langchain.docstore.document import Document
 
-
-# --------------------------------------------------------------------------
-# Data structures
-# --------------------------------------------------------------------------
-
 @dataclass
 class SourceChunk:
-    """A single retrieved chunk, kept lightweight for display in the UI."""
     source: str
     page: Optional[int]
     text: str
@@ -64,11 +31,6 @@ class SourceChunk:
 class RAGAnswer:
     answer: str
     sources: List[SourceChunk]
-
-
-# --------------------------------------------------------------------------
-# Loading
-# --------------------------------------------------------------------------
 
 LOADER_MAP = {
     ".pdf": PyPDFLoader,
@@ -99,10 +61,6 @@ def load_documents(file_paths: List[str]) -> List[Document]:
     return all_docs
 
 
-# --------------------------------------------------------------------------
-# Chunking
-# --------------------------------------------------------------------------
-
 def split_documents(
     docs: List[Document],
     chunk_size: int = 1000,
@@ -115,11 +73,6 @@ def split_documents(
         separators=["\n\n", "\n", ". ", " ", ""],
     )
     return splitter.split_documents(docs)
-
-
-# --------------------------------------------------------------------------
-# Embeddings + Vector store
-# --------------------------------------------------------------------------
 
 _EMBEDDING_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 _embeddings_singleton = None
