@@ -8,10 +8,8 @@ from langchain_community.document_loaders import (
     Docx2txtLoader,
 )
 try:
-    # Modern langchain (0.1+) ships this as its own package
     from langchain_text_splitters import RecursiveCharacterTextSplitter
 except ImportError:
-    # Fallback for older langchain versions where it still lived here
     from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
@@ -20,8 +18,10 @@ try:
 except ImportError:
     from langchain.docstore.document import Document
 
+
 @dataclass
 class SourceChunk:
+    """A single retrieved chunk, kept lightweight for display in the UI."""
     source: str
     page: Optional[int]
     text: str
@@ -76,6 +76,7 @@ def split_documents(
     )
     return splitter.split_documents(docs)
 
+
 _EMBEDDING_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 _embeddings_singleton = None
 
@@ -107,11 +108,6 @@ def load_vectorstore(path: str) -> FAISS:
     return FAISS.load_local(path, embeddings, allow_dangerous_deserialization=True)
 
 
-# --------------------------------------------------------------------------
-# LLM setup (only place that calls a paid/hosted API, and only for the
-# final answer — not for embeddings)
-# --------------------------------------------------------------------------
-
 def get_llm(provider: str, api_key: str, model: Optional[str] = None):
     """
     Return a LangChain chat model for the chosen provider.
@@ -128,22 +124,11 @@ def get_llm(provider: str, api_key: str, model: Optional[str] = None):
         from langchain_google_genai import ChatGoogleGenerativeAI
         return ChatGoogleGenerativeAI(
             google_api_key=api_key,
-            # Pinned to a specific stable (non-preview) model rather than a
-            # moving alias, for reproducible behavior. NOTE: "gemini-1.5-flash"
-            # has been fully retired by Google (calls now 404) — do not use it.
-            # "gemini-2.5-flash" is the current stable Flash model as of this
-            # writing. If Google retires it later, pass an explicit `model`
-            # (e.g. "gemini-3.8-flash") to override this default.
             model=model or "gemini-2.5-flash",
             temperature=0,
         )
     else:
         raise ValueError(f"Unknown provider: {provider}")
-
-
-# --------------------------------------------------------------------------
-# Prompt
-# --------------------------------------------------------------------------
 
 SYSTEM_PROMPT = """You are a helpful knowledge assistant. Answer the user's \
 question using ONLY the information in the "Context" section below, which \
@@ -173,10 +158,6 @@ def _format_context(chunks: List[Document]) -> str:
         parts.append(f"[Excerpt {i} — {src}{page_str}]\n{c.page_content}")
     return "\n\n".join(parts)
 
-
-# --------------------------------------------------------------------------
-# End-to-end query
-# --------------------------------------------------------------------------
 
 def _extract_text(response) -> str:
     """
@@ -234,8 +215,12 @@ def retrieve_with_scores(
     chunks into the prompt regardless of quality.
 
     search_type:
-      - "similarity": plain nearest-neighbor search, with a 0-1 relevance
-        score per chunk (via FAISS's relevance-score normalization).
+      - "similarity": plain nearest-neighbor search, with a 0-1 cosine
+        similarity score per chunk, computed directly from FAISS's raw
+        distance (see note below) rather than via LangChain's built-in
+        relevance-score helper, whose default normalization for FAISS's
+        L2 index is not reliably calibrated to a clean 0-1 range and was
+        producing scores that were almost always low regardless of query.
       - "mmr": Maximal Marginal Relevance — trades a little top-1 relevance
         for less redundant, more diverse chunks (useful for broad/vague
         questions). Scores aren't available for MMR, so score=None.
@@ -248,11 +233,25 @@ def retrieve_with_scores(
         return [(d, None) for d in docs]
 
     try:
-        scored = vectorstore.similarity_search_with_relevance_scores(question, k=k)
+        # FAISS's default index here uses squared L2 (Euclidean) distance.
+        # Because our embeddings are L2-normalized (encode_kwargs=
+        # {"normalize_embeddings": True} in get_embeddings), there is an
+        # exact closed-form relationship between that distance and cosine
+        # similarity for unit vectors:
+        #     ||a - b||^2 = 2 - 2*cos_sim(a, b)   =>   cos_sim = 1 - d^2/2
+        # This gives a correctly calibrated 0-1-ish score without relying
+        # on LangChain's distance-strategy-dependent approximation.
+        raw = vectorstore.similarity_search_with_score(question, k=k)
     except Exception:
-        # Some vectorstore/embedding combinations don't support normalized
-        # relevance scores — fall back to plain similarity search with no score.
+        # Fall back to plain similarity search with no score if the
+        # vectorstore doesn't support returning distances for some reason.
         return [(d, None) for d in vectorstore.similarity_search(question, k=k)]
+
+    scored = []
+    for doc, distance in raw:
+        cos_sim = 1.0 - (float(distance) ** 2) / 2.0
+        cos_sim = max(0.0, min(1.0, cos_sim))  # clamp for float noise
+        scored.append((doc, cos_sim))
 
     if score_threshold > 0:
         filtered = [(d, s) for d, s in scored if s >= score_threshold]
@@ -313,9 +312,9 @@ def answer_question(
     confidence = None
     if scores_available:
         top_score = max(scores_available)
-        if top_score >= 0.6:
+        if top_score >= 0.5:
             confidence = "high"
-        elif top_score >= 0.35:
+        elif top_score >= 0.3:
             confidence = "medium"
         else:
             confidence = "low"

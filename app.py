@@ -289,7 +289,7 @@ def render_sources(sources):
             score_html = ""
             if s.get("score") is not None:
                 pct = round(s["score"] * 100)
-                tier = "high" if s["score"] >= 0.6 else "medium" if s["score"] >= 0.35 else "low"
+                tier = "high" if s["score"] >= 0.5 else "medium" if s["score"] >= 0.3 else "low"
                 score_html = f'<span class="score-badge score-{tier}">{pct}%</span>'
 
             snippet = " ".join(s["text"].split())  # collapse newlines/extra whitespace to one line
