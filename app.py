@@ -1,12 +1,3 @@
-"""
-app.py
-------
-Streamlit front-end for the AI Knowledge Assistant.
-
-Run with:
-    streamlit run app.py
-"""
-
 import os
 import tempfile
 import hashlib
@@ -35,9 +26,6 @@ EXAMPLE_PROMPTS = [
     "List any numbers, dates, or figures that appear",
 ]
 
-# --------------------------------------------------------------------------
-# Look & feel
-# --------------------------------------------------------------------------
 st.markdown(
     """
     <style>
@@ -154,9 +142,6 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# --------------------------------------------------------------------------
-# Session state
-# --------------------------------------------------------------------------
 if "vectorstore" not in st.session_state:
     st.session_state.vectorstore = None
 if "chat_history" not in st.session_state:
@@ -178,10 +163,6 @@ def _get_secret(name: str) -> str:
         pass
     return os.environ.get(name, "")
 
-
-# --------------------------------------------------------------------------
-# Sidebar
-# --------------------------------------------------------------------------
 with st.sidebar:
     st.subheader("Settings")
 
@@ -234,18 +215,12 @@ with st.sidebar:
         st.session_state.chat_history = []
         st.rerun()
 
-# --------------------------------------------------------------------------
-# Header
-# --------------------------------------------------------------------------
 st.markdown('<p class="app-title">DocChat</p>', unsafe_allow_html=True)
 st.markdown(
     '<p class="app-subtitle">Chat with your documents. Attach files below, then ask anything.</p>',
     unsafe_allow_html=True,
 )
 
-# --------------------------------------------------------------------------
-# File attach — auto-indexes on change
-# --------------------------------------------------------------------------
 uploaded_files = st.file_uploader(
     "Attach documents",
     type=["pdf", "txt", "docx"],
@@ -304,10 +279,6 @@ def render_sources(sources):
             )
         st.markdown('<div class="source-list">' + "".join(rows) + "</div>", unsafe_allow_html=True)
 
-
-# --------------------------------------------------------------------------
-# Chat
-# --------------------------------------------------------------------------
 if not st.session_state.chat_history and st.session_state.vectorstore is not None:
     st.markdown('<div class="empty-state">Ask something about your document to get started.<br><br>', unsafe_allow_html=True)
     chip_html = "".join(f'<span class="example-chip">{p}</span>' for p in EXAMPLE_PROMPTS)
