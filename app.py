@@ -1,20 +1,9 @@
-"""
-app.py
-------
-Streamlit front-end for the AI Knowledge Assistant.
-
-Run with:
-    streamlit run app.py
-"""
 
 import os
 import tempfile
 import hashlib
 import logging
 
-# Streamlit's hot-reload file watcher probes every submodule of `transformers`
-# (including vision ones that need `torchvision`, which we don't use here) and
-# logs a harmless traceback for each. This just silences that specific logger.
 logging.getLogger("streamlit.watcher.local_sources_watcher").setLevel(logging.ERROR)
 
 import streamlit as st
@@ -29,12 +18,9 @@ from rag_engine import (
 
 st.set_page_config(page_title="DocChat", page_icon="💬", layout="wide")
 
-USER_AVATAR = "🙂"
-BOT_AVATAR = "💬"
+USER_AVATAR = "You"
+BOT_AVATAR = "DocChat"
 
-# --------------------------------------------------------------------------
-# Look & feel — plain chat-app styling instead of a "tool" look
-# --------------------------------------------------------------------------
 st.markdown(
     """
     <style>
@@ -87,10 +73,6 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
-
-# --------------------------------------------------------------------------
-# Session state
-# --------------------------------------------------------------------------
 if "vectorstore" not in st.session_state:
     st.session_state.vectorstore = None
 if "chat_history" not in st.session_state:
@@ -100,9 +82,6 @@ if "processed_files" not in st.session_state:
 if "indexed_signature" not in st.session_state:
     st.session_state.indexed_signature = None
 
-# --------------------------------------------------------------------------
-# Sidebar — kept minimal, plain-language settings
-# --------------------------------------------------------------------------
 with st.sidebar:
     st.subheader("Settings")
 
@@ -141,18 +120,12 @@ with st.sidebar:
         st.session_state.chat_history = []
         st.rerun()
 
-# --------------------------------------------------------------------------
-# Header
-# --------------------------------------------------------------------------
 st.markdown('<p class="app-title">DocChat</p>', unsafe_allow_html=True)
 st.markdown(
     '<p class="app-subtitle">Chat with your documents. Attach files below, then ask anything.</p>',
     unsafe_allow_html=True,
 )
 
-# --------------------------------------------------------------------------
-# File attach — auto-indexes on change, no separate "build" step
-# --------------------------------------------------------------------------
 uploaded_files = st.file_uploader(
     "Attach documents",
     type=["pdf", "txt", "docx"],
@@ -187,9 +160,6 @@ if uploaded_files:
 if st.session_state.processed_files:
     st.caption("Ready: " + ", ".join(st.session_state.processed_files))
 
-# --------------------------------------------------------------------------
-# Chat
-# --------------------------------------------------------------------------
 for turn in st.session_state.chat_history:
     avatar = USER_AVATAR if turn["role"] == "user" else BOT_AVATAR
     with st.chat_message(turn["role"], avatar=avatar):
