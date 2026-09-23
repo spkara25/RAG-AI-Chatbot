@@ -1,3 +1,30 @@
+"""
+rag_engine.py
+--------------
+Core RAG (Retrieval-Augmented Generation) pipeline.
+
+Pipeline stages implemented here:
+  1. Load documents (PDF / TXT / DOCX)
+  2. Split into chunks
+  3. Generate embeddings (LOCAL, free — sentence-transformers)
+  4. Store in a FAISS vector store
+  5. Retrieve relevant chunks for a question
+  6. Generate an answer using an LLM, constrained to the retrieved context
+  7. Return the answer + source citations
+
+Design choice for cost control
+-------------------------------
+Embeddings are computed locally with `sentence-transformers/all-MiniLM-L6-v2`
+(runs on CPU, no API key, no cost, no rate limits). This is normally the most
+API-call-heavy part of a RAG pipeline (one call per chunk), so doing it for
+free is what keeps this app cheap to run repeatedly.
+
+Only the final answer-generation step calls an LLM API, and only ONCE per
+question (not once per chunk), using a cheap/fast model by default
+(gpt-4o-mini for OpenAI, or gemini-1.5-flash for Gemini — both inexpensive,
+and Gemini has a free tier).
+"""
+
 import os
 from dataclasses import dataclass
 from typing import List, Optional
@@ -8,8 +35,10 @@ from langchain_community.document_loaders import (
     Docx2txtLoader,
 )
 try:
+    # Modern langchain (0.1+) ships this as its own package
     from langchain_text_splitters import RecursiveCharacterTextSplitter
 except ImportError:
+    # Fallback for older langchain versions where it still lived here
     from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
@@ -18,6 +47,10 @@ try:
 except ImportError:
     from langchain.docstore.document import Document
 
+
+# --------------------------------------------------------------------------
+# Data structures
+# --------------------------------------------------------------------------
 
 @dataclass
 class SourceChunk:
@@ -33,6 +66,11 @@ class RAGAnswer:
     answer: str
     sources: List[SourceChunk]
     confidence: Optional[str] = None  # "high" / "medium" / "low", or None if unscored
+
+
+# --------------------------------------------------------------------------
+# Loading
+# --------------------------------------------------------------------------
 
 LOADER_MAP = {
     ".pdf": PyPDFLoader,
@@ -63,6 +101,10 @@ def load_documents(file_paths: List[str]) -> List[Document]:
     return all_docs
 
 
+# --------------------------------------------------------------------------
+# Chunking
+# --------------------------------------------------------------------------
+
 def split_documents(
     docs: List[Document],
     chunk_size: int = 1000,
@@ -76,6 +118,10 @@ def split_documents(
     )
     return splitter.split_documents(docs)
 
+
+# --------------------------------------------------------------------------
+# Embeddings + Vector store
+# --------------------------------------------------------------------------
 
 _EMBEDDING_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 _embeddings_singleton = None
@@ -108,6 +154,11 @@ def load_vectorstore(path: str) -> FAISS:
     return FAISS.load_local(path, embeddings, allow_dangerous_deserialization=True)
 
 
+# --------------------------------------------------------------------------
+# LLM setup (only place that calls a paid/hosted API, and only for the
+# final answer — not for embeddings)
+# --------------------------------------------------------------------------
+
 def get_llm(provider: str, api_key: str, model: Optional[str] = None):
     """
     Return a LangChain chat model for the chosen provider.
@@ -124,11 +175,22 @@ def get_llm(provider: str, api_key: str, model: Optional[str] = None):
         from langchain_google_genai import ChatGoogleGenerativeAI
         return ChatGoogleGenerativeAI(
             google_api_key=api_key,
+            # Pinned to a specific stable (non-preview) model rather than a
+            # moving alias, for reproducible behavior. NOTE: "gemini-1.5-flash"
+            # has been fully retired by Google (calls now 404) — do not use it.
+            # "gemini-2.5-flash" is the current stable Flash model as of this
+            # writing. If Google retires it later, pass an explicit `model`
+            # (e.g. "gemini-3.8-flash") to override this default.
             model=model or "gemini-2.5-flash",
             temperature=0,
         )
     else:
         raise ValueError(f"Unknown provider: {provider}")
+
+
+# --------------------------------------------------------------------------
+# Prompt
+# --------------------------------------------------------------------------
 
 SYSTEM_PROMPT = """You are a helpful knowledge assistant. Answer the user's \
 question using ONLY the information in the "Context" section below, which \
@@ -158,6 +220,10 @@ def _format_context(chunks: List[Document]) -> str:
         parts.append(f"[Excerpt {i} — {src}{page_str}]\n{c.page_content}")
     return "\n\n".join(parts)
 
+
+# --------------------------------------------------------------------------
+# End-to-end query
+# --------------------------------------------------------------------------
 
 def _extract_text(response) -> str:
     """
@@ -233,14 +299,16 @@ def retrieve_with_scores(
         return [(d, None) for d in docs]
 
     try:
-        # FAISS's default index here uses squared L2 (Euclidean) distance.
-        # Because our embeddings are L2-normalized (encode_kwargs=
-        # {"normalize_embeddings": True} in get_embeddings), there is an
-        # exact closed-form relationship between that distance and cosine
-        # similarity for unit vectors:
-        #     ||a - b||^2 = 2 - 2*cos_sim(a, b)   =>   cos_sim = 1 - d^2/2
-        # This gives a correctly calibrated 0-1-ish score without relying
-        # on LangChain's distance-strategy-dependent approximation.
+        # FAISS's default index here uses L2 (Euclidean) distance, and
+        # critically, `similarity_search_with_score` returns the SQUARED
+        # L2 distance directly (this is FAISS's own IndexFlatL2 behavior,
+        # passed through unmodified by LangChain) — it is not the plain
+        # distance. Because our embeddings are L2-normalized (unit
+        # vectors), squared L2 distance and cosine similarity are related
+        # by the exact identity:
+        #     ||a - b||^2 = 2 - 2*cos_sim(a, b)   =>   cos_sim = 1 - d²/2
+        # where d² here is *already* the value FAISS returns — it must
+        # NOT be squared again.
         raw = vectorstore.similarity_search_with_score(question, k=k)
     except Exception:
         # Fall back to plain similarity search with no score if the
@@ -248,8 +316,8 @@ def retrieve_with_scores(
         return [(d, None) for d in vectorstore.similarity_search(question, k=k)]
 
     scored = []
-    for doc, distance in raw:
-        cos_sim = 1.0 - (float(distance) ** 2) / 2.0
+    for doc, squared_distance in raw:
+        cos_sim = 1.0 - (float(squared_distance) / 2.0)
         cos_sim = max(0.0, min(1.0, cos_sim))  # clamp for float noise
         scored.append((doc, cos_sim))
 
